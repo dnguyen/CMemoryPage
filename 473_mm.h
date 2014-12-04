@@ -1,9 +1,9 @@
 #ifndef _473_MM_H
 #define _473_MM_H
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
-#include <errno.h>
 #include <sys/mman.h>
 
 /*
