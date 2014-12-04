@@ -17,7 +17,8 @@ struct virtual_page_queue {
 };
 
 // Function prototypes
-
+void handle_segv_fifo(siginfo_t *si);
+void handle_segv_clock(siginfo_t *si);
 
 // Global variables
 void *VM_START;
@@ -32,17 +33,14 @@ virtual_page_queue *PAGE_QUEUE;
 static void segv_handler(int sig, siginfo_t *si, void *unused) {
     printf("[SEGV HANDLER] sig=%d address=%p\n", sig, si->si_addr);
 
-    // Find page in queue from address
-    // If the page is in the queue -> This means we're trying to write to a page already in virtual memory (Not a page fault)
-    //      mprotect it with PROT_READ|PROT_WRITE
-    //      set modified field for page = 1
-    // Else -> Means we're accessing a page that was evicted or was never brought into virtual memory yet
-    //      add new page to the queue
-    //          -> check if size of queue is = NUMBER_OF_FRAMES. If it is, need to do eviction.
-    //              When evicting a page, mprotect it with PROT_READ|PROT_WRITE
-    //      mprotect new page with PROT_READ
-    //      increment FAULT_COUNT
-
+    if (POLICY == 1) {
+        handle_segv_fifo(si);
+    } else if (POLICY == 2) {
+        handle_segv_clock(si);
+    } else {
+        printf("Invalid policy.\n");
+        exit(EXIT_FAILURE);
+    }
     // For testing. don't need to exit if done correctly
     exit(EXIT_FAILURE);
 }
@@ -80,4 +78,21 @@ unsigned long mm_report_nwrite_backs() {
     return WRITE_BACK_COUNT;
 }
 
+void handle_segv_fifo(siginfo_t *si) {
 
+    // Find page in queue from address
+    // If the page is in the queue -> This means we're trying to write to a page already in virtual memory (Not a page fault)
+    //      mprotect it with PROT_READ|PROT_WRITE
+    //      set modified field for page = 1
+    // Else -> Means we're accessing a page that was evicted or was never brought into virtual memory yet
+    //      add new page to the queue
+    //          -> check if size of queue is = NUMBER_OF_FRAMES. If it is, need to do eviction.
+    //              When evicting a page, mprotect it with PROT_READ|PROT_WRITE
+    //      mprotect new page with PROT_READ
+    //      increment FAULT_COUNT
+
+}
+
+void handle_segv_clock(siginfo_t *si) {
+
+}
