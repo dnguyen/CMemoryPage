@@ -23,16 +23,11 @@ struct virtual_page_queue {
 void handle_segv_fifo(siginfo_t *si);
 void handle_segv_clock(siginfo_t *si);
 
-void protect (void*, int, int);
-
-
-int isInQueue(int);
-int getPageNum(void*);
-struct virtual_page* getPageByPageNum(int);
-struct virtual_page* pop();
-struct virtual_page* push(void*);
-int getQueueSize();
-struct virtual_page* getNewPage(void*);
+int translate_to_page_number(void*);
+void print_queue(virtual_page_queue *queue);
+virtual_page *get_page(virtual_page_queue*, void*);
+void enqueue(virtual_page_queue*, virtual_page*);
+virtual_page* dequeue(virtual_page_queue*);
 
 // Global variables
 void *VM_START;
@@ -45,7 +40,7 @@ int WRITE_BACK_COUNT = 0;
 virtual_page_queue *PAGE_QUEUE;
 
 static void segv_handler(int sig, siginfo_t *si, void *unused) {
-   // printf("[SEGV HANDLER] sig=%d address=%p\n", sig, si->si_addr);
+    printf("[SEGV HANDLER] sig=%d address=%p\n", sig, si->si_addr);
 
     if (POLICY == 1) {
         handle_segv_fifo(si);
@@ -78,7 +73,13 @@ void mm_init(void* vm, int vm_size, int n_frames, int page_size, int policy) {
         printf("sigaction failed\n");
     }
 
+    // Initialize the queue for fifo
     PAGE_QUEUE = malloc(sizeof(PAGE_QUEUE));
+    PAGE_QUEUE->head = NULL;
+    PAGE_QUEUE->tail = NULL;
+    PAGE_QUEUE->size = 0;
+
+    // Protect entire memory space to fire initial segv
     mprotect(vm, vm_size, PROT_NONE);
 
     return;
@@ -105,20 +106,34 @@ void handle_segv_fifo(siginfo_t *si) {
     //      mprotect new page with PROT_READ
     //      increment FAULT_COUNT
 
-    int protection = 0;
-    int pageNum = getPageNum(si->si_addr);
-    void* pPage = VM_START + pageNum*PAGE_SIZE;
+    int page_number = translate_to_page_number(si->si_addr);
+    void* page_start_addr = VM_START + page_number * PAGE_SIZE;
+    virtual_page *page = get_page(PAGE_QUEUE, si->si_addr);
 
-    if (isInQueue(pageNum)) {
-        protection = PROT_READ|PROT_WRITE;
-        struct virtual_page* pPage = getPageByPageNum(pageNum);
-        pPage->modified = 1;
+    printf("[HANDLE SEGV] request address=%p page_num=%d\n", si->si_addr, page_number);
+    if (page != NULL) {
+        printf("\t[PAGE IN QUEUE] start=%p num=%d size=%d\n", page->start, page->number, page->size);
+        print_queue(PAGE_QUEUE);
+
+        // We know we're doing a write here because:
+        //      - page is already in the queue
+        //      - page was initially given PROT_READ when it was added to the queue
+        // so, set the page as modified and allow reads and writes to the page
+        page->modified = 1;
+        mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
     } else {
-        push(pPage);
-        protection = PROT_READ;
+        printf("\t[PAGE NOT IN QUEUE]\n");
+        virtual_page *new_page = malloc(sizeof(virtual_page));
+        new_page->start = page_start_addr;
+        new_page->size = PAGE_SIZE;
+        new_page->number = page_number;
+        enqueue(PAGE_QUEUE, new_page);
+        print_queue(PAGE_QUEUE);
         FAULT_COUNT++;
+        printf("\t[PROTECTING] page=%d {%p - %p}\n", new_page->number, new_page->start, new_page->start+new_page->size);
+        // Since the page is now in the queue, allow reads to this page.
+        mprotect(new_page->start, new_page->size, PROT_READ);
     }
-    protect(pPage, PAGE_SIZE, protection);
 
 }
 
@@ -126,116 +141,73 @@ void handle_segv_clock(siginfo_t *si) {
 
 }
 
-void protect (void* addr, int pageSize, int protection) {
-    if (mprotect(addr, pageSize, protection) == -1) {
-        printf("Error: errno=%d\n", errno);
-        perror("SignalHandler could not mprotect.\n");
-        exit(errno);
-    }
-    return;
-}
+// Returns the page that contains the request address
+// If the page is not in the queue, return null
+virtual_page *get_page(virtual_page_queue* queue, void* address) {
+    int page_num = translate_to_page_number(address);
 
-
-int isInQueue(int pageNum) {
-    struct virtual_page* curr = PAGE_QUEUE->head;
-    if(PAGE_QUEUE->head->number<0)return 0;
-    while (curr != NULL) {
-        if (curr->number == pageNum) {
-            return 1;
+    virtual_page *current = queue->head;
+    while (current != NULL) {
+        if (current->number == page_num) {
+            return current;
         }
-        curr = curr->next;
+        current = current->next;
     }
-    return 0;
-}
-
-int getPageNum(void* pAddr) {
-return (int)((pAddr - VM_START) / PAGE_SIZE);
-}
-
-struct virtual_page* getPageByPageNum(int pageNum) {
-    if (PAGE_QUEUE->head == NULL) {
-        return NULL;
-    }
-    if (PAGE_QUEUE->head->number == pageNum) {
-        return PAGE_QUEUE->head;
-    }
-    struct virtual_page* curr = PAGE_QUEUE->head->next;
-    while (curr != NULL && curr != PAGE_QUEUE->head) {
-        if (curr->number == pageNum) {
-            return curr;
-        }
-        curr = curr->next;
-    }
-    perror("getPageByPageNum returning NULL.\n");
-    exit(-1);
     return NULL;
 }
 
-
-
-struct virtual_page* pop() {
-    if (PAGE_QUEUE->tail == NULL) {
-        perror("pop Tail is NULL.\n");
-        exit(0);
-        return NULL;
-    }
-    struct virtual_page* newTail = PAGE_QUEUE->tail->prev;
-    if (newTail == NULL) {
-        perror("pop newTail is NULL.\n");
-        exit(0);
-        return NULL;
-    }
-    if (PAGE_QUEUE->tail->modified) {
-        WRITE_BACK_COUNT++;
-    }
-    newTail->next = NULL;
-    free(PAGE_QUEUE->tail);
-    PAGE_QUEUE->tail = newTail;
-    return PAGE_QUEUE->tail;
-}
-
-int getQueueSize() {
-    struct virtual_page* curr = PAGE_QUEUE->head;
-    int size = 0;
-    while (curr != NULL) {
-        curr = curr->next;
-        size++;
-    }
-    return size;
-}
-
-struct virtual_page* getNewPage(void* pAddr) {
-    struct virtual_page* newPage = (struct virtual_page*) malloc(sizeof(struct virtual_page));
-    newPage->prev = NULL;
-    newPage->next = NULL;
-    newPage->number = getPageNum(pAddr);
-    newPage->modified = 0;
-    newPage->start = pAddr;
-}
-
-struct virtual_page* push(void* pAddr) {
-    struct virtual_page* newPage = getNewPage(pAddr);
-    int pageNum = newPage->number;
-    if (PAGE_QUEUE->head->number<0) {
-        PAGE_QUEUE->head = newPage;
-        PAGE_QUEUE->head->next = NULL;
-        PAGE_QUEUE->head->prev = NULL;
-    PAGE_QUEUE->tail = PAGE_QUEUE->head;
-    return PAGE_QUEUE->head;
-    }
-    if (getQueueSize() == NUMBER_OF_FRAMES) {
-        if (PAGE_QUEUE->tail == NULL) {
-            printf("ERROR push Tail == NULL, exiting\n");
-            exit(-1);
+void enqueue(virtual_page_queue* queue, virtual_page* page) {
+    printf("\t[ENQUEUE] page=%d\n", page->number);
+    // Check if we need to evict any pages first.
+    if (queue->size >= NUMBER_OF_FRAMES) {
+        printf("\t\t[MAX FRAMES]\n");
+        virtual_page *evicted_page = dequeue(PAGE_QUEUE);
+        // If the page was modified, increment the write back count.
+        if (evicted_page->modified == 1) {
+            WRITE_BACK_COUNT++;
         }
-        void* start = VM_START + PAGE_QUEUE->tail->number*PAGE_SIZE;
-        protect(start, PAGE_SIZE, PROT_NONE);
-        pop();
+        print_queue(PAGE_QUEUE);
     }
-    newPage->next = PAGE_QUEUE->head;
-    PAGE_QUEUE->head->prev = newPage;
-    newPage->prev = NULL;
-    PAGE_QUEUE->head = newPage;
-    return PAGE_QUEUE->head;
+
+    if (queue->head == NULL) {
+        queue->head = page;
+        queue->tail = page;
+        page->next = NULL;
+    } else {
+        page->prev = queue->tail;
+        queue->tail->next = page;
+        queue->tail = page;
+    }
+    queue->size++;
 }
 
+virtual_page* dequeue(virtual_page_queue* queue) {
+    printf("\t[DEQUEUE]\n");
+    virtual_page *temp = queue->head;
+    if (queue->head->next != NULL) {
+        queue->head = queue->head->next;
+        queue->head->prev = NULL;
+    } else {
+        queue->head = NULL;
+    }
+    queue->size--;
+
+    printf("\t[PROTECTING] page num=%d {%p - %p}\n", temp->number, temp->start, temp->start+temp->size);
+    mprotect(temp->start, temp->size, PROT_NONE);
+
+    return temp;
+}
+
+int translate_to_page_number(void* address) {
+    return (int)((address - VM_START) / PAGE_SIZE);
+}
+
+void print_queue(virtual_page_queue *queue) {
+    virtual_page *current = queue->head;
+    printf("\t[QUEUE] size=%d  ", queue->size);
+    while (current != NULL) {
+        printf("[%d {%p - %p}] ", current->number, current->start, current->start+current->size);
+        current = current->next;
+    }
+    printf("\n");
+}
