@@ -8,6 +8,7 @@ struct virtual_page {
     void* start;
     int size;
     int modified;
+    int referenced;
     virtual_page *next;
     virtual_page *prev;
 };
@@ -16,6 +17,7 @@ typedef struct virtual_page_queue virtual_page_queue;
 struct virtual_page_queue {
     virtual_page *head;
     virtual_page *tail;
+    virtual_page *hand;
     int size;
 };
 
@@ -28,6 +30,12 @@ void print_queue(virtual_page_queue *queue);
 virtual_page *get_page(virtual_page_queue*, void*);
 void enqueue(virtual_page_queue*, virtual_page*);
 virtual_page* dequeue(virtual_page_queue*);
+
+// Functions for clock algorithm
+virtual_page *circular_get_page(virtual_page_queue*, void*);
+void circular_enqueue(virtual_page_queue*, virtual_page*);
+void circular_print_queue(virtual_page_queue*);
+void circular_replace(virtual_page_queue*, virtual_page*, virtual_page*);
 
 // Global variables
 void *VM_START;
@@ -73,13 +81,15 @@ void mm_init(void* vm, int vm_size, int n_frames, int page_size, int policy) {
         printf("sigaction failed\n");
     }
 
-    // Initialize the queue for fifo
-    PAGE_QUEUE = malloc(sizeof(PAGE_QUEUE));
+    // Initialize the queue
+    PAGE_QUEUE = malloc(sizeof(virtual_page_queue));
     PAGE_QUEUE->head = NULL;
     PAGE_QUEUE->tail = NULL;
+    PAGE_QUEUE->hand = NULL;
     PAGE_QUEUE->size = 0;
 
     // Protect entire memory space to fire initial segv
+    printf("[PROTECTING ENTIRE VM] {%p - %p}\n", vm, vm+vm_size);
     mprotect(vm, vm_size, PROT_NONE);
 
     return;
@@ -138,7 +148,29 @@ void handle_segv_fifo(siginfo_t *si) {
 }
 
 void handle_segv_clock(siginfo_t *si) {
+    
+    int page_number = translate_to_page_number(si->si_addr);
+    void* page_start_addr = VM_START + page_number * PAGE_SIZE;
+    virtual_page *page = circular_get_page(PAGE_QUEUE, si->si_addr);
 
+    printf("[HANDLE SEGV] request address=%p page_num=%d\n", si->si_addr, page_number);
+    if (page != NULL) {
+       printf("\t[PAGE IN QUEUE]\n");
+       circular_print_queue(PAGE_QUEUE);
+       page->modified = 1;
+       mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
+    } else {
+       printf("\t[PAGE NOT IN QUEUE]\n");
+        virtual_page *new_page = malloc(sizeof(virtual_page));
+        new_page->start = page_start_addr;
+        new_page->size = PAGE_SIZE;
+        new_page->number = page_number;
+        new_page->referenced = 1;
+        circular_enqueue(PAGE_QUEUE, new_page);
+        circular_print_queue(PAGE_QUEUE);
+        FAULT_COUNT++;
+        mprotect(new_page->start, new_page->size, PROT_READ);
+    }
 }
 
 // Returns the page that contains the request address
@@ -202,6 +234,90 @@ int translate_to_page_number(void* address) {
     return (int)((address - VM_START) / PAGE_SIZE);
 }
 
+virtual_page *circular_get_page(virtual_page_queue* queue, void* address) {
+    int page_num = translate_to_page_number(address);
+
+    if (queue->head != NULL) {
+        virtual_page *current = queue->head;
+        do {
+            if (current->number == page_num) {
+                return current;
+            }
+            current = current->next;
+        } while (current != queue->head);
+    }
+
+    return NULL;
+}
+
+void circular_enqueue(virtual_page_queue* queue, virtual_page* page) {
+    printf("\t[ENQUEUE] page=%d\n", page->number);
+
+    if (queue->head == NULL) {
+        queue->head = page;
+        queue->tail = page;
+        page->next = page;
+        page->prev = queue->tail;
+        queue->hand = page;
+        queue->size++;
+    } else {
+
+        if (queue->size >= NUMBER_OF_FRAMES) {
+            printf("\t\t[MAX FRAMES]\n");
+            virtual_page *current = queue->hand;
+            circular_print_queue(PAGE_QUEUE);
+            while (current->referenced != 0) {
+                current->referenced = 0;
+                current = current->next;
+            }
+            queue->hand = current->next;
+            printf("\t\t[FOUND PAGE TO EVICT] page=%d ref=%d\n", current->number, current->referenced);
+            circular_replace(PAGE_QUEUE, current, page);
+            circular_print_queue(PAGE_QUEUE);
+            mprotect(page->start, page->size, PROT_READ);
+        } else {
+            queue->tail->next = page;
+            page->prev = queue->tail;
+            page->next = queue->head;
+            queue->tail = page;
+            queue->size++;
+        }
+    }
+
+    // Ensure queue remains circular
+    queue->head->prev = queue->tail;
+    queue->tail->next = queue->head;
+}
+
+// Replaces old_page with new_page
+void circular_replace(virtual_page_queue* queue, virtual_page* old_page, virtual_page* new_page) {
+
+    if (old_page->modified == 1) {
+        WRITE_BACK_COUNT++;
+    }
+
+    new_page->next = old_page->next;
+    new_page->prev = old_page->prev;
+
+    old_page->prev->next = new_page;
+    old_page->next->prev = new_page;
+    if (old_page == queue->head) {
+        queue->head = new_page;
+    }
+
+    if (old_page == queue->tail) {
+        queue->tail = new_page;
+    }
+    // Ensure queue remains circular
+    queue->head->prev = queue->tail;
+    queue->tail->next = queue->head;
+
+    // protect old page
+    mprotect(old_page->start, old_page->size, PROT_NONE);
+
+    free(old_page);
+}
+
 void print_queue(virtual_page_queue *queue) {
     virtual_page *current = queue->head;
     printf("\t[QUEUE] size=%d  ", queue->size);
@@ -209,5 +325,15 @@ void print_queue(virtual_page_queue *queue) {
         printf("[%d {%p - %p}] ", current->number, current->start, current->start+current->size);
         current = current->next;
     }
+    printf("\n");
+}
+
+void circular_print_queue(virtual_page_queue *queue) {
+    virtual_page *current = queue->head;
+    printf("\t[QUEUE] size=%d hand=%d ", queue->size, queue->hand->number);
+    do {
+        printf("[%d r=%d p=%d n=%d] ", current->number, current->referenced, current->prev->number, current->next->number);
+        current = current->next;    
+    } while (current != queue->head);
     printf("\n");
 }

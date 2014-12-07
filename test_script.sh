@@ -26,12 +26,33 @@ function testFIFO {
     verify output_5
 }
 
+function testClock {
+    echo "[TESTING CLOCK]"
+
+    ./test_2 > /dev/null 2>&1
+    echo -e "\t[TEST #2]"
+    verify output_2
+
+    ./test_4 > /dev/null 2>&1
+    echo -e "\t[TEST #4]"
+    verify output_4
+
+    ./test_6 > /dev/null 2>&1
+    echo -e "\t[TEST #6] -> Check manually...diff doesn't work for some reason for 5"
+    verify output_6
+}
 
 make compile_1
+make compile_2
 make compile_3
+make compile_4
 make compile_5
+make compile_6
 
 if [ "$POLICY" = "1" ]
 then
     testFIFO
+elif [ "$POLICY" = "2" ]
+then
+    testClock
 fi
