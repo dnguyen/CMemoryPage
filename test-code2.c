@@ -30,23 +30,39 @@ int main ()
 	mm_log(f1);	
 
 	/* virtual memory access starts */
-	
+	printf("[r0]\n");
 	temp = vm_ptr[8];					// Read virtual page 1
-	mm_log(f1);			 
+	mm_log(f1);		
+
+	printf("[w1]\n");	 
 	vm_ptr[8 + ((int)((1*PAGE_SIZE)/sizeof(int)))] = 72; 	// Write virtual page 2
-	mm_log(f1);												 
+	mm_log(f1);			
+
+	printf("[w0]\n");
 	vm_ptr[16] = 12;					// Write virtual page 1 
-	mm_log(f1);												 
+	mm_log(f1);		
+
+	printf("[r2]\n");
 	temp = vm_ptr[8 + ((int)((2*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 3
-	mm_log(f1);												 
+	mm_log(f1);		
+
+	printf("[r3]\n");
 	temp = vm_ptr[8 + ((int)((3*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 4
-	mm_log(f1);												 
+	mm_log(f1);		
+
+	printf("[r0]\n");
 	temp = vm_ptr[24];					// Read virtual page 1 
-	mm_log(f1);												 
+	mm_log(f1);		
+
+	printf("[r4]\n");
 	temp = vm_ptr[8 + ((int)((4*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 5
-	mm_log(f1);												 
+	mm_log(f1);		
+
+	printf("[w0]\n");
 	vm_ptr[32] = 64;					// Write virtual page 1  
-	mm_log(f1);												 
+	mm_log(f1);		
+
+	printf("[r1]\n");
 	temp = vm_ptr[16 + ((int)((1*PAGE_SIZE)/sizeof(int)))]; // Read virtual page 2
 	mm_log(f1);												 
 

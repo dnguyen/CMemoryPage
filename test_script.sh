@@ -38,7 +38,7 @@ function testClock {
     verify output_4
 
     ./test_6 > /dev/null 2>&1
-    echo -e "\t[TEST #6] -> Check manually...diff doesn't work for some reason for 5"
+    echo -e "\t[TEST #6] -> Check manually...diff doesn't work for some reason for 6"
     verify output_6
 }
 
@@ -54,5 +54,8 @@ then
     testFIFO
 elif [ "$POLICY" = "2" ]
 then
+    testClock
+else
+    testFIFO
     testClock
 fi

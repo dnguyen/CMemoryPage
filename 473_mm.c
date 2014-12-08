@@ -32,6 +32,7 @@ void enqueue(virtual_page_queue*, virtual_page*);
 virtual_page* dequeue(virtual_page_queue*);
 
 // Functions for clock algorithm
+void clock_init(virtual_page_queue*, int);
 virtual_page *circular_get_page(virtual_page_queue*, void*);
 void circular_enqueue(virtual_page_queue*, virtual_page*);
 void circular_print_queue(virtual_page_queue*);
@@ -58,8 +59,6 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
         printf("Invalid policy.\n");
         exit(EXIT_FAILURE);
     }
-    // For testing. don't need to exit if done correctly
-    //exit(EXIT_FAILURE);
 }
 
 void mm_init(void* vm, int vm_size, int n_frames, int page_size, int policy) {
@@ -88,6 +87,11 @@ void mm_init(void* vm, int vm_size, int n_frames, int page_size, int policy) {
     PAGE_QUEUE->hand = NULL;
     PAGE_QUEUE->size = 0;
 
+    if (POLICY == 2) {
+        clock_init(PAGE_QUEUE, n_frames);
+        circular_print_queue(PAGE_QUEUE);
+    }
+    
     // Protect entire memory space to fire initial segv
     printf("[PROTECTING ENTIRE VM] {%p - %p}\n", vm, vm+vm_size);
     mprotect(vm, vm_size, PROT_NONE);
@@ -123,7 +127,6 @@ void handle_segv_fifo(siginfo_t *si) {
     printf("[HANDLE SEGV] request address=%p page_num=%d\n", si->si_addr, page_number);
     if (page != NULL) {
         printf("\t[PAGE IN QUEUE] start=%p num=%d size=%d\n", page->start, page->number, page->size);
-        print_queue(PAGE_QUEUE);
 
         // We know we're doing a write here because:
         //      - page is already in the queue
@@ -131,6 +134,7 @@ void handle_segv_fifo(siginfo_t *si) {
         // so, set the page as modified and allow reads and writes to the page
         page->modified = 1;
         mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
+        print_queue(PAGE_QUEUE);
     } else {
         printf("\t[PAGE NOT IN QUEUE]\n");
         virtual_page *new_page = malloc(sizeof(virtual_page));
@@ -155,22 +159,63 @@ void handle_segv_clock(siginfo_t *si) {
 
     printf("[HANDLE SEGV] request address=%p page_num=%d\n", si->si_addr, page_number);
     if (page != NULL) {
-       printf("\t[PAGE IN QUEUE]\n");
-       circular_print_queue(PAGE_QUEUE);
-       page->modified = 1;
-       mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
+
+        printf("\t[PAGE IN QUEUE] num=%d\n", page->number);
+        page->modified = 1;
+        page->referenced = 1;
+        mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
+        circular_print_queue(PAGE_QUEUE);
     } else {
-       printf("\t[PAGE NOT IN QUEUE]\n");
+        printf("\t[PAGE NOT IN QUEUE]\n");
+        if (PAGE_QUEUE->size > 0)
+            circular_print_queue(PAGE_QUEUE);
         virtual_page *new_page = malloc(sizeof(virtual_page));
         new_page->start = page_start_addr;
         new_page->size = PAGE_SIZE;
         new_page->number = page_number;
+        new_page->modified = 0;
         new_page->referenced = 1;
         circular_enqueue(PAGE_QUEUE, new_page);
         circular_print_queue(PAGE_QUEUE);
         FAULT_COUNT++;
         mprotect(new_page->start, new_page->size, PROT_READ);
     }
+}
+
+// Initializes blank referenced pages for clock algorithm
+void clock_init(virtual_page_queue* queue, int n) {
+
+    // Create initial head page, then attach the rest of the pages
+    // Need to create n empty pages
+    virtual_page *head_page = malloc(sizeof(virtual_page));
+    head_page->start = VM_START + PAGE_SIZE;
+    head_page->size = PAGE_SIZE;
+    head_page->number = -1;
+    head_page->referenced = 1;
+    head_page->modified = 0;
+    queue->head = head_page;
+    queue->tail = head_page;
+
+    // Attach empty pages to head page
+    int i = 0;
+    for (i = 0; i < n-1; i++) {
+        void* page_start_addr = VM_START + i * PAGE_SIZE;
+        virtual_page *new_page = malloc(sizeof(virtual_page));
+        new_page->start = page_start_addr;
+        new_page->size = PAGE_SIZE;
+        new_page->number = -1;
+        new_page->referenced = 1;
+        new_page->modified = 0;
+        new_page->prev = queue->tail;
+        new_page->next = queue->head;
+        queue->tail->next = new_page;
+        queue->tail = new_page;
+    }
+
+    // Set the hand of the clock to the head. and Ensure the queue is circular.
+    queue->hand = queue->head;
+    queue->head->prev = queue->tail;
+    queue->tail->next = queue->head;
 }
 
 // Returns the page that contains the request address
@@ -253,46 +298,21 @@ virtual_page *circular_get_page(virtual_page_queue* queue, void* address) {
 void circular_enqueue(virtual_page_queue* queue, virtual_page* page) {
     printf("\t[ENQUEUE] page=%d\n", page->number);
 
-    if (queue->head == NULL) {
-        queue->head = page;
-        queue->tail = page;
-        page->next = page;
-        page->prev = queue->tail;
-        queue->hand = page;
-        queue->size++;
-    } else {
-
-        if (queue->size >= NUMBER_OF_FRAMES) {
-            printf("\t\t[MAX FRAMES]\n");
-            virtual_page *current = queue->hand;
-            circular_print_queue(PAGE_QUEUE);
-            while (current->referenced != 0) {
-                current->referenced = 0;
-                current = current->next;
-            }
-            queue->hand = current->next;
-            printf("\t\t[FOUND PAGE TO EVICT] page=%d ref=%d\n", current->number, current->referenced);
-            circular_replace(PAGE_QUEUE, current, page);
-            circular_print_queue(PAGE_QUEUE);
-            mprotect(page->start, page->size, PROT_READ);
-        } else {
-            queue->tail->next = page;
-            page->prev = queue->tail;
-            page->next = queue->head;
-            queue->tail = page;
-            queue->size++;
-        }
+    virtual_page *current = queue->hand->next;
+    while (current->referenced == 1) {
+        current->referenced = 0;
+        current = current->next;
     }
 
-    // Ensure queue remains circular
-    queue->head->prev = queue->tail;
-    queue->tail->next = queue->head;
+    circular_replace(PAGE_QUEUE, current, page);
+    queue->hand = current->next;
 }
 
 // Replaces old_page with new_page
 void circular_replace(virtual_page_queue* queue, virtual_page* old_page, virtual_page* new_page) {
 
     if (old_page->modified == 1) {
+        printf("\t\t[INCREMENT WRITE_BACK_COUNT] page_num=%d\n", old_page->number);
         WRITE_BACK_COUNT++;
     }
 
@@ -332,7 +352,7 @@ void circular_print_queue(virtual_page_queue *queue) {
     virtual_page *current = queue->head;
     printf("\t[QUEUE] size=%d hand=%d ", queue->size, queue->hand->number);
     do {
-        printf("[%d r=%d p=%d n=%d] ", current->number, current->referenced, current->prev->number, current->next->number);
+        printf("[%d r=%d m=%d] ", current->number, current->referenced, current->modified);
         current = current->next;    
     } while (current != queue->head);
     printf("\n");

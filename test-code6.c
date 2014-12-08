@@ -42,33 +42,51 @@ r1
 r3
 r5
  * */
+	printf("[r0]\n");
 	temp = vm_ptr[8];					// Read virtual page 1
-	mm_log(f1);											
+	mm_log(f1);			
+
+	printf("[w1]\n");								
 	vm_ptr[8 + ((int)((1*PAGE_SIZE)/sizeof(int)))] = 72; 	// Write virtual page 2
-	mm_log(f1);										
+	mm_log(f1);			
+
+	printf("[r2]\n");
 	temp = vm_ptr[8 + ((int)((2*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 3
-	mm_log(f1);									
+	mm_log(f1);
+
+	printf("[r3]\n");
 	temp = vm_ptr[8 + ((int)((3*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 4
-	mm_log(f1);								
+	mm_log(f1);	
+
+	printf("[r4]\n");
 	temp = vm_ptr[8 + ((int)((4*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 5 
-	mm_log(f1);							
+	mm_log(f1);	
+
+	printf("[r1]\n");
 	temp = vm_ptr[8 + ((int)((1*PAGE_SIZE)/sizeof(int)))];	// Read virtual page 2
-	mm_log(f1);						
+	mm_log(f1);	
+
+	printf("[r0]\n");
 	temp = vm_ptr[9];					// Read virtual page 1
-	mm_log(f1);					
+	mm_log(f1);		
+
+	printf("[r1]\n");
 	temp = vm_ptr[2 + ((int)((1*PAGE_SIZE)/sizeof(int)))]; // Read virtual page 3
-	mm_log(f1);				
+	mm_log(f1);		
+
+	printf("[r4]\n");
 	temp = vm_ptr[8 + ((int)((4*PAGE_SIZE)/sizeof(int)))]; // Read virtual page 5
 	mm_log(f1);				
 
 	/* virtual memory access ends */
 
 	free(vm_ptr);
+	fclose(f1);
 	return 0;
 }
 
-void mm_log(FILE* f1)
+void mm_log(FILE *f1)
 {
-	fprintf(f1, "%ld %ld\n", mm_report_npage_faults(), mm_report_nwrite_backs());	
-	printf("%ld %ld\n", mm_report_npage_faults(), mm_report_nwrite_backs());	
+	fprintf(f1, "%ld %ld\n", mm_report_npage_faults(), mm_report_nwrite_backs());
+	printf("%ld %ld\n", mm_report_npage_faults(), mm_report_nwrite_backs());
 }
