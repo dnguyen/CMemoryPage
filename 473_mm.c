@@ -26,16 +26,15 @@ void handle_segv_fifo(siginfo_t *si);
 void handle_segv_clock(siginfo_t *si);
 
 int translate_to_page_number(void*);
-void print_queue(virtual_page_queue *queue);
 virtual_page *get_page(virtual_page_queue*, void*);
 void enqueue(virtual_page_queue*, virtual_page*);
 virtual_page* dequeue(virtual_page_queue*);
+virtual_page* init_page(int, void*, int, int);
 
 // Functions for clock algorithm
 void clock_init(virtual_page_queue*, int);
 virtual_page *circular_get_page(virtual_page_queue*, void*);
 void circular_enqueue(virtual_page_queue*, virtual_page*);
-void circular_print_queue(virtual_page_queue*);
 void circular_replace(virtual_page_queue*, virtual_page*, virtual_page*);
 
 // Global variables
@@ -49,8 +48,6 @@ int WRITE_BACK_COUNT = 0;
 virtual_page_queue *PAGE_QUEUE;
 
 static void segv_handler(int sig, siginfo_t *si, void *unused) {
-    printf("[SEGV HANDLER] sig=%d address=%p\n", sig, si->si_addr);
-
     if (POLICY == 1) {
         handle_segv_fifo(si);
     } else if (POLICY == 2) {
@@ -62,7 +59,6 @@ static void segv_handler(int sig, siginfo_t *si, void *unused) {
 }
 
 void mm_init(void* vm, int vm_size, int n_frames, int page_size, int policy) {
-    printf("[mm_init] vm=%p vm_size=%d n_frames=%d page_size=%d policy=%d\n", vm, vm_size, n_frames, page_size, policy);
 
     // Initialize global variables
     VM_START = vm;
@@ -88,12 +84,11 @@ void mm_init(void* vm, int vm_size, int n_frames, int page_size, int policy) {
     PAGE_QUEUE->size = 0;
 
     if (POLICY == 2) {
+        // Initially create n blank virtual pages and add them to the circular list
         clock_init(PAGE_QUEUE, n_frames);
-        circular_print_queue(PAGE_QUEUE);
     }
-    
+
     // Protect entire memory space to fire initial segv
-    printf("[PROTECTING ENTIRE VM] {%p - %p}\n", vm, vm+vm_size);
     mprotect(vm, vm_size, PROT_NONE);
 
     return;
@@ -109,42 +104,22 @@ unsigned long mm_report_nwrite_backs() {
 
 void handle_segv_fifo(siginfo_t *si) {
 
-    // Find page in queue from address
-    // If the page is in the queue -> This means we're trying to write to a page already in virtual memory (Not a page fault)
-    //      mprotect it with PROT_READ|PROT_WRITE
-    //      set modified field for page = 1
-    // Else -> Means we're accessing a page that was evicted or was never brought into virtual memory yet
-    //      add new page to the queue
-    //          -> check if size of queue is = NUMBER_OF_FRAMES. If it is, need to do eviction.
-    //              When evicting a page, mprotect it with PROT_READ|PROT_WRITE
-    //      mprotect new page with PROT_READ
-    //      increment FAULT_COUNT
-
     int page_number = translate_to_page_number(si->si_addr);
     void* page_start_addr = VM_START + page_number * PAGE_SIZE;
     virtual_page *page = get_page(PAGE_QUEUE, si->si_addr);
 
-    printf("[HANDLE SEGV] request address=%p page_num=%d\n", si->si_addr, page_number);
     if (page != NULL) {
-        printf("\t[PAGE IN QUEUE] start=%p num=%d size=%d\n", page->start, page->number, page->size);
-
         // We know we're doing a write here because:
         //      - page is already in the queue
         //      - page was initially given PROT_READ when it was added to the queue
         // so, set the page as modified and allow reads and writes to the page
         page->modified = 1;
         mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
-        print_queue(PAGE_QUEUE);
     } else {
-        printf("\t[PAGE NOT IN QUEUE]\n");
-        virtual_page *new_page = malloc(sizeof(virtual_page));
-        new_page->start = page_start_addr;
-        new_page->size = PAGE_SIZE;
-        new_page->number = page_number;
+        virtual_page *new_page = init_page(page_number, page_start_addr, 0, 0);
         enqueue(PAGE_QUEUE, new_page);
-        print_queue(PAGE_QUEUE);
         FAULT_COUNT++;
-        printf("\t[PROTECTING] page=%d {%p - %p}\n", new_page->number, new_page->start, new_page->start+new_page->size);
+
         // Since the page is now in the queue, allow reads to this page.
         mprotect(new_page->start, new_page->size, PROT_READ);
     }
@@ -157,26 +132,13 @@ void handle_segv_clock(siginfo_t *si) {
     void* page_start_addr = VM_START + page_number * PAGE_SIZE;
     virtual_page *page = circular_get_page(PAGE_QUEUE, si->si_addr);
 
-    printf("[HANDLE SEGV] request address=%p page_num=%d\n", si->si_addr, page_number);
     if (page != NULL) {
-
-        printf("\t[PAGE IN QUEUE] num=%d\n", page->number);
         page->modified = 1;
         page->referenced = 1;
         mprotect(page->start, page->size, PROT_READ|PROT_WRITE);
-        circular_print_queue(PAGE_QUEUE);
     } else {
-        printf("\t[PAGE NOT IN QUEUE]\n");
-        if (PAGE_QUEUE->size > 0)
-            circular_print_queue(PAGE_QUEUE);
-        virtual_page *new_page = malloc(sizeof(virtual_page));
-        new_page->start = page_start_addr;
-        new_page->size = PAGE_SIZE;
-        new_page->number = page_number;
-        new_page->modified = 0;
-        new_page->referenced = 1;
+        virtual_page *new_page = init_page(page_number, page_start_addr, 0, 1);
         circular_enqueue(PAGE_QUEUE, new_page);
-        circular_print_queue(PAGE_QUEUE);
         FAULT_COUNT++;
         mprotect(new_page->start, new_page->size, PROT_READ);
     }
@@ -187,12 +149,7 @@ void clock_init(virtual_page_queue* queue, int n) {
 
     // Create initial head page, then attach the rest of the pages
     // Need to create n empty pages
-    virtual_page *head_page = malloc(sizeof(virtual_page));
-    head_page->start = VM_START + PAGE_SIZE;
-    head_page->size = PAGE_SIZE;
-    head_page->number = -1;
-    head_page->referenced = 1;
-    head_page->modified = 0;
+    virtual_page *head_page = init_page(-1, VM_START + PAGE_SIZE, 0, 1);
     queue->head = head_page;
     queue->tail = head_page;
 
@@ -200,12 +157,7 @@ void clock_init(virtual_page_queue* queue, int n) {
     int i = 0;
     for (i = 0; i < n-1; i++) {
         void* page_start_addr = VM_START + i * PAGE_SIZE;
-        virtual_page *new_page = malloc(sizeof(virtual_page));
-        new_page->start = page_start_addr;
-        new_page->size = PAGE_SIZE;
-        new_page->number = -1;
-        new_page->referenced = 1;
-        new_page->modified = 0;
+        virtual_page *new_page = init_page(-1, page_start_addr, 0, 1);
         new_page->prev = queue->tail;
         new_page->next = queue->head;
         queue->tail->next = new_page;
@@ -234,16 +186,13 @@ virtual_page *get_page(virtual_page_queue* queue, void* address) {
 }
 
 void enqueue(virtual_page_queue* queue, virtual_page* page) {
-    printf("\t[ENQUEUE] page=%d\n", page->number);
     // Check if we need to evict any pages first.
     if (queue->size >= NUMBER_OF_FRAMES) {
-        printf("\t\t[MAX FRAMES]\n");
         virtual_page *evicted_page = dequeue(PAGE_QUEUE);
         // If the page was modified, increment the write back count.
         if (evicted_page->modified == 1) {
             WRITE_BACK_COUNT++;
         }
-        print_queue(PAGE_QUEUE);
     }
 
     if (queue->head == NULL) {
@@ -259,7 +208,6 @@ void enqueue(virtual_page_queue* queue, virtual_page* page) {
 }
 
 virtual_page* dequeue(virtual_page_queue* queue) {
-    printf("\t[DEQUEUE]\n");
     virtual_page *temp = queue->head;
     if (queue->head->next != NULL) {
         queue->head = queue->head->next;
@@ -269,7 +217,6 @@ virtual_page* dequeue(virtual_page_queue* queue) {
     }
     queue->size--;
 
-    printf("\t[PROTECTING] page num=%d {%p - %p}\n", temp->number, temp->start, temp->start+temp->size);
     mprotect(temp->start, temp->size, PROT_NONE);
 
     return temp;
@@ -283,6 +230,7 @@ virtual_page *circular_get_page(virtual_page_queue* queue, void* address) {
     int page_num = translate_to_page_number(address);
 
     if (queue->head != NULL) {
+        // Keep traversing the list until we hit the head again.
         virtual_page *current = queue->head;
         do {
             if (current->number == page_num) {
@@ -296,9 +244,7 @@ virtual_page *circular_get_page(virtual_page_queue* queue, void* address) {
 }
 
 void circular_enqueue(virtual_page_queue* queue, virtual_page* page) {
-    printf("\t[ENQUEUE] page=%d\n", page->number);
-
-    virtual_page *current = queue->hand->next;
+    virtual_page *current = queue->hand;
     while (current->referenced == 1) {
         current->referenced = 0;
         current = current->next;
@@ -312,7 +258,6 @@ void circular_enqueue(virtual_page_queue* queue, virtual_page* page) {
 void circular_replace(virtual_page_queue* queue, virtual_page* old_page, virtual_page* new_page) {
 
     if (old_page->modified == 1) {
-        printf("\t\t[INCREMENT WRITE_BACK_COUNT] page_num=%d\n", old_page->number);
         WRITE_BACK_COUNT++;
     }
 
@@ -338,22 +283,15 @@ void circular_replace(virtual_page_queue* queue, virtual_page* old_page, virtual
     free(old_page);
 }
 
-void print_queue(virtual_page_queue *queue) {
-    virtual_page *current = queue->head;
-    printf("\t[QUEUE] size=%d  ", queue->size);
-    while (current != NULL) {
-        printf("[%d {%p - %p}] ", current->number, current->start, current->start+current->size);
-        current = current->next;
-    }
-    printf("\n");
-}
+// Initializes a new virtual page
+virtual_page* init_page(int number, void* start_addr, int modified, int referenced) {
+    virtual_page *new_page = malloc(sizeof(virtual_page));
 
-void circular_print_queue(virtual_page_queue *queue) {
-    virtual_page *current = queue->head;
-    printf("\t[QUEUE] size=%d hand=%d ", queue->size, queue->hand->number);
-    do {
-        printf("[%d r=%d m=%d] ", current->number, current->referenced, current->modified);
-        current = current->next;    
-    } while (current != queue->head);
-    printf("\n");
+    new_page->start = start_addr;
+    new_page->size = PAGE_SIZE;
+    new_page->number = number;
+    new_page->referenced = referenced;
+    new_page->modified = modified;   
+
+    return new_page;
 }
